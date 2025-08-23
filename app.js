@@ -46,14 +46,60 @@ mongoose
   .then(() => console.log('Connected to MongoDB'))
   .catch((err) => console.error('MongoDB connection error:', err));
 
-/** Split summary into sentences (simple heuristic) */
-function splitIntoSentences(text) {
-  if (!text) return [];
-  return text
-    .replace(/\r\n/g, ' ')
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+
+/**
+ * Parse the structured script returned from the summarisation prompt.
+ *
+ * The summarisation prompt instructs the model to output a series of
+ * blocks formatted like:
+ *
+ * "sentence": "text here"
+ * "action": "action name"
+ * END_SENTENCE
+ *
+ * ... repeated for each sentence ...
+ *
+ * At the end of all sentences, the script contains the marker END_SUMMARY.
+ * This function extracts each sentence/action pair into an array of
+ * objects. If the script does not match the expected format, it falls
+ * back to splitting on punctuation similar to the previous behaviour.
+ *
+ * @param {string} script The raw summary text returned by the chat model
+ * @returns {Array<{ sentence: string, action: string|null }>} Array of parsed sentences and actions
+ */
+function parseStructuredScript(script) {
+  if (!script || typeof script !== 'string') return [];
+  let text = script.trim();
+  // Remove the END_SUMMARY marker and anything that follows
+  const endIdx = text.indexOf('END_SUMMARY');
+  if (endIdx !== -1) {
+    text = text.substring(0, endIdx);
+  }
+  const parts = text.split(/END_SENTENCE\s*/i).map((p) => p.trim()).filter(Boolean);
+  const result = [];
+  for (const part of parts) {
+    // Look for "sentence": "..."
+    const sentenceMatch = part.match(/"sentence"\s*:\s*"([^"]*)"/i);
+    const actionMatch = part.match(/"action"\s*:\s*"([^"]*)"/i);
+    if (sentenceMatch) {
+      const sentence = sentenceMatch[1].trim();
+      const action = actionMatch ? actionMatch[1].trim() : null;
+      // Ignore empty sentences
+      if (sentence) {
+        result.push({ sentence, action });
+      }
+    }
+  }
+  // If nothing matched the structured format, fall back to old sentence splitting
+  if (result.length === 0) {
+    const fallback = script
+      .replace(/\r\n/g, ' ')
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    return fallback.map((s) => ({ sentence: s, action: null }));
+  }
+  return result;
 }
 
 /** Fisher-Yates shuffle */
@@ -103,19 +149,24 @@ app.post('/summaries', async (req, res) => {
     const summary = await generateSummary(text);
     if (!summary) return res.status(502).json({ error: 'Failed to generate summary.' });
 
-    // Split & prepare title
-    const sentences = splitIntoSentences(summary);
-    if (sentences.length === 0) return res.status(502).json({ error: 'Empty summary returned.' });
-    const title = sentences[0] || 'Summary';
-
-    // TTS each sentence -> save MP3 -> build sections
+    // Parse the structured script into sentence/action pairs
+    const parsed = parseStructuredScript(summary);
+    if (parsed.length === 0) {
+      return res.status(502).json({ error: 'Empty or invalid summary returned.' });
+    }
+    // The first sentence acts as the title
+    const title = parsed[0].sentence || 'Summary';
+    // Generate audio for each sentence and build the sections array
     const sections = [];
-    for (const sentence of sentences) {
+    for (const { sentence, action } of parsed) {
       const filename = `${uuidv4()}.mp3`;
       const filePath = path.join(__dirname, config.audioDir, filename);
       const audioBuffer = await generateSpeech(sentence);
       await fs.promises.writeFile(filePath, audioBuffer);
-      sections.push({ text: sentence, audio: `/audio/${filename}` });
+      // Include the action if provided
+      const section = { text: sentence, audio: `/audio/${filename}` };
+      if (action) section.action = action;
+      sections.push(section);
     }
 
     // Persist

@@ -1,31 +1,27 @@
 const mongoose = require('mongoose');
 
-// Define the schema for a single section of a story. Each section
-// represents one sentence from the summary along with a link to the
-// generated audio file. Storing the audio link as a simple string
-// preserves flexibility – you can serve static files from the same
-// server or point to an external storage service such as S3 later on.
+// Define a sub-schema for each section of the story. Each section
+// contains the text to be read aloud, the corresponding audio file
+// path, and the animation action. The action field is optional
+// because some summaries may not specify one.
 const SectionSchema = new mongoose.Schema(
   {
     text: { type: String, required: true },
-    audio: { type: String, required: true }
+    audio: { type: String, required: true },
+    action: { type: String, default: null },
   },
   { _id: false }
 );
 
-// Stories consist of a title and an ordered list of sections. The
-// `sections` field is an array of SectionSchema objects. Mongoose will
-// enforce the defined structure when saving documents to the
-// collection.
+// Define the main Story schema. A story has a title and an ordered
+// list of sections. Timestamps are enabled so we can track when
+// stories are created and updated.
 const StorySchema = new mongoose.Schema(
   {
     title: { type: String, required: true },
-    sections: { type: [SectionSchema], required: true }
+    sections: { type: [SectionSchema], default: [] },
   },
   { timestamps: true }
 );
 
-// Export the model. Mongoose will create a collection called
-// `stories` in the configured database. When using this model, call
-// `Story.create()` or `new Story()` to insert documents.
 module.exports = mongoose.model('Story', StorySchema);

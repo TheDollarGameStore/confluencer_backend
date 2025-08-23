@@ -40,7 +40,34 @@ module.exports = {
     Provide me a script containing only the text that needs to be read out loud. No markdown, No parentheticals, stage directions, narrative asides, inline action cues or anything else.
     The first sentence you write is the title and it needs to be clickbait and catchy. It should also be short.
     Do not use new lines. Just continual sentences.
-    Insert some jabs at typical corporate culture and red tape where appropriate.`,
+    Insert some jabs at typical corporate culture and red tape where appropriate.
+    
+    The script should be structured as follows:
+    
+    "sentence": "sentence goes here"
+    "action": "action name here"
+    END_SENTENCE
+    
+    Repeat this for each sentence.
+    
+    At the end of all sentences, add the following:
+    END_SUMMARY
+
+    You decide what animation action to use. The actions you have available to you are the following:
+
+    thinking
+    shrug
+    laugh
+    disappointed
+    confused
+    happy
+    surprised
+    excited
+    angry
+    explaining 1
+    explaining 2
+    explaining 3
+    `,
 
   // Default model used for chat completions. Update this to a model your
   // account has access to (e.g. "gpt-4o", "gpt-3.5-turbo").
