@@ -14,6 +14,9 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+// Cheerio is used to scrape text from HTML pages when a URL is provided
+// instead of raw text. Ensure cheerio is installed in your project.
+const cheerio = require('cheerio');
 
 const config = require('./config');
 const Story = require('./models/story');
@@ -140,13 +143,46 @@ async function generateSpeech(sentence) {
 /** POST /summaries */
 app.post('/summaries', async (req, res) => {
   try {
-    const { text } = req.body;
-    if (!text || typeof text !== 'string' || !text.trim()) {
-      return res.status(400).json({ error: 'Missing or empty `text`.' });
+    // Allow callers to provide either a raw text string or a URL to scrape.
+    const { text, url } = req.body;
+    // Validate that at least one of text or url is provided
+    if ((!text || typeof text !== 'string' || !text.trim()) &&
+        (!url || typeof url !== 'string' || !url.trim())) {
+      return res.status(400).json({ error: 'Missing or empty `text` or `url` field.' });
     }
 
-    // Summarise
-    const summary = await generateSummary(text);
+    // Determine the content to summarise. Default to `text` if provided.
+    let inputContent = text;
+
+    // If a URL is provided, fetch the page and extract human‑readable content
+    if (url && typeof url === 'string' && url.trim()) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+        }
+        const html = await response.text();
+        const $ = cheerio.load(html);
+        // Collect paragraph and heading text into an array
+        const paragraphs = [];
+        $('h1, h2, h3, h4, h5, h6, p').each((_i, el) => {
+          const txt = $(el).text().trim();
+          if (txt) paragraphs.push(txt);
+        });
+        let extracted = paragraphs.join(' ');
+        // Fallback to the entire body text if no paragraphs were captured
+        if (!extracted) {
+          extracted = $('body').text().replace(/\s+/g, ' ').trim();
+        }
+        inputContent = extracted;
+      } catch (err) {
+        console.error('Error fetching or parsing URL:', err);
+        return res.status(400).json({ error: 'Unable to fetch or parse the provided URL.' });
+      }
+    }
+
+    // Summarise the extracted or provided text
+    const summary = await generateSummary(inputContent);
     if (!summary) return res.status(502).json({ error: 'Failed to generate summary.' });
 
     // Parse the structured script into sentence/action pairs
