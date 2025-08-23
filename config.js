@@ -92,5 +92,9 @@ module.exports = {
   secret: process.env.B2_SECRET || "",
   region: process.env.B2_REGION || "us-east-005",
   endpoint: process.env.B2_ENDPOINT || "https://s3.us-east-005.backblazeb2.com",
-  publicUrlBase: process.env.B2_PUBLIC_URL_BASE || `https://f005.backblazeb2.com/file/confluenceraudio`
+  publicUrlBase: process.env.B2_PUBLIC_URL_BASE || `https://f005.backblazeb2.com/file/confluenceraudio`,
+
+  // CORS: comma-separated list of allowed origins for GET (e.g., "https://confluencerclient.vercel.app")
+  corsAllowedOrigins:
+    process.env.CORS_ALLOWED_ORIGINS || 'https://confluencerclient.vercel.app',
 };

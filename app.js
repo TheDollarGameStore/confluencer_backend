@@ -14,8 +14,9 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const fetch = global.fetch || ((...args) => import('node-fetch').then(({default: f}) => f(...args)));
+const fetch = global.fetch || ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
 const cheerio = require('cheerio');
+const cors = require('cors');
 
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
@@ -23,8 +24,31 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const config = require('./config');
 const Story = require('./models/story');
 
+/* ----------------------------- CORS (GET-only) ----------------------------- */
+/**
+ * Only allow your Vercel frontend to make **GET** requests. We do **not**
+ * attach CORS to POST, so browsers can’t call it cross-origin; tools like
+ * Postman still work fine.
+ */
+const allowedOrigins =
+  (config.corsAllowedOrigins || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+const corsGetOnly = cors({
+  origin(origin, cb) {
+    // Allow server-to-server (no Origin) and explicit allowed origins
+    if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
+  },
+  methods: ['GET'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 600,
+});
+
 /* ----------------------- Backblaze B2 (S3-compatible) setup ----------------------- */
-function mask(s){ return s ? s.slice(0,4) + '…(' + s.length + ')' : 'MISSING'; }
+function mask(s) { return s ? s.slice(0, 4) + '…(' + s.length + ')' : 'MISSING'; }
 function assertB2Config(cfg) {
   console.log('[B2 CONFIG]',
     '\n bucket   =', cfg.bucket || 'MISSING',
@@ -178,6 +202,7 @@ async function generateSpeech(text) {
 
 /** POST /summaries
  * Body: { text?: string, url?: string }
+ * NOTE: No CORS middleware here on purpose (frontend shouldn’t call POST).
  */
 app.post('/summaries', async (req, res) => {
   try {
@@ -271,8 +296,11 @@ app.post('/summaries', async (req, res) => {
   }
 });
 
-/** GET /summaries -> return the whole DB shuffled, with presigned URLs */
-app.get('/summaries', async (_req, res) => {
+/** GET /summaries -> return the whole DB shuffled, with presigned URLs
+ * CORS is attached here so your Vercel app can call it.
+ */
+app.options('/summaries', corsGetOnly); // good hygiene for preflight (even though GET doesn’t need it)
+app.get('/summaries', corsGetOnly, async (_req, res) => {
   try {
     const docs = await Story.find({}).lean();
 
