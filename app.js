@@ -2,10 +2,10 @@
  * Main application file for the summary-to-speech service.
  *
  * Endpoints:
- *   POST /summaries  -> Summarise input text, TTS each sentence, store in MongoDB
- *   GET  /summaries  -> Return up to 10 random stories in random order
+ *   POST /summaries  -> Summarise input text or URL, TTS each sentence, upload to B2, store in Mongo (store object keys, not URLs)
+ *   GET  /summaries  -> Return all stories, each section includes a fresh presigned audio URL
  *
- * Config lives in ./config.js
+ * Requires ./config.js and ./models/story.js
  */
 
 const express = require('express');
@@ -14,40 +14,64 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-// Cheerio is used to scrape text from HTML pages when a URL is provided
-// instead of raw text. Ensure cheerio is installed in your project.
+const fetch = global.fetch || ((...args) => import('node-fetch').then(({default: f}) => f(...args)));
 const cheerio = require('cheerio');
+
+const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const config = require('./config');
 const Story = require('./models/story');
 
-/* ----------------------- B2 (S3-compatible) setup ----------------------- */
+/* ----------------------- Backblaze B2 (S3-compatible) setup ----------------------- */
+function mask(s){ return s ? s.slice(0,4) + '…(' + s.length + ')' : 'MISSING'; }
+function assertB2Config(cfg) {
+  console.log('[B2 CONFIG]',
+    '\n bucket   =', cfg.bucket || 'MISSING',
+    '\n region   =', cfg.region || 'MISSING',
+    '\n endpoint =', cfg.endpoint || 'MISSING',
+    '\n keyID    =', mask(cfg.key),
+    '\n secret   =', cfg.secret ? `(len:${cfg.secret.length})` : 'MISSING'
+  );
+  const errs = [];
+  if (!cfg.bucket || cfg.bucket === '-') errs.push('B2_BUCKET is missing or invalid.');
+  if (!cfg.key || cfg.key.length < 20) errs.push('B2_KEY (Key ID) looks invalid/short.');
+  if (!cfg.secret || cfg.secret.length < 20) errs.push('B2_SECRET looks invalid/short.');
+  if (!cfg.region) errs.push('B2_REGION missing.');
+  if (!cfg.endpoint) errs.push('B2_ENDPOINT missing.');
+  if (errs.length) throw new Error('Backblaze B2 config error:\n - ' + errs.join('\n - '));
+}
+assertB2Config(config);
+
 const b2S3 = new S3Client({
-  region: config.region,                 // e.g. "us-west-002"
-  endpoint: config.endpoint,             // e.g. "https://s3.us-west-002.backblazeb2.com"
-  forcePathStyle: false,                 // B2 supports virtual-hosted style; set true if your setup needs it
+  region: config.region,                     // e.g. "us-east-005"
+  endpoint: config.endpoint,                 // e.g. "https://s3.us-east-005.backblazeb2.com"
+  forcePathStyle: /\./.test(config.bucket),  // only true if bucket has dots
   credentials: {
-    accessKeyId: config.key || '',
-    secretAccessKey: config.secret || '',
+    accessKeyId: config.key,
+    secretAccessKey: config.secret,
   },
 });
 
+async function presignAudio(key, expiresSeconds = 3600) {
+  const cmd = new GetObjectCommand({ Bucket: config.bucket, Key: key });
+  return getSignedUrl(b2S3, cmd, { expiresIn: expiresSeconds });
+}
+
+// Optional: for public buckets only (kept here for reference)
 function b2PublicUrl(key) {
-  // Prefer explicit public base from config, else fall back to default pattern
   const base =
     (config.publicUrlBase && config.publicUrlBase.trim()) ||
-    `https://f002.backblazeb2.com/file/${config.bucket}`;
-  // ensure no trailing slash
+    `https://f005.backblazeb2.com/file/${config.bucket}`; // fXXX should match region if you use this
   const cleanBase = base.replace(/\/+$/, '');
   return `${cleanBase}/${key}`;
 }
-/* ----------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------------- */
 
-// Ensure audio output directory exists (harmless even if unused)
+// Ensure audio output dir exists (for local debug; uploads go to B2)
 fs.mkdirSync(path.join(__dirname, config.audioDir), { recursive: true });
 
-// --- OpenAI clients ---
+/* ------------------------------ OpenAI clients ----------------------------------- */
 // Chat client (summarisation)
 const chatClient = new OpenAI({
   apiKey: config.openAiChatApiKey,
@@ -59,11 +83,12 @@ const ttsClient = new OpenAI({
   apiKey: config.openAiTtsApiKey,
   baseURL: config.openAiTtsApiUrl,
 });
+/* ---------------------------------------------------------------------------------- */
 
 // Express
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use('/audio', express.static(path.join(__dirname, config.audioDir))); // kept for backward compat
+app.use('/audio', express.static(path.join(__dirname, config.audioDir))); // legacy local serving
 
 // Mongo
 mongoose
@@ -86,7 +111,6 @@ function shuffle(arr) {
 
 /**
  * Generate a summary script using the chat model.
- * The prompt is loaded from config.summarisatonPrompt.
  */
 async function generateSummary(inputText) {
   try {
@@ -96,7 +120,6 @@ async function generateSummary(inputText) {
         { role: 'system', content: config.summarisationPrompt },
         { role: 'user', content: inputText }
       ],
-      // omit temperature entirely for max compatibility
     });
     const text = resp?.choices?.[0]?.message?.content?.trim();
     return text || '';
@@ -106,31 +129,17 @@ async function generateSummary(inputText) {
   }
 }
 
-
 /**
- * Parse the structured summary format defined in the prompt.
- *
- * The summarisation prompt instructs the model to output a series of
- * blocks formatted like:
- *
- * "sentence": "text here"
- * "action": "action name"
- * END_SENTENCE
- *
- * ... repeated for each sentence ...
- *
- * At the end of all sentences, the script contains the marker END_SUMMARY.
- * This function extracts each sentence/action pair into an array of
- * objects. If the script does not match the expected format, it falls
- * back to splitting on punctuation similar to the previous behaviour.
- *
- * @param {string} script The raw summary text returned by the chat model
- * @returns {Array<{ sentence: string, action: string|null }>} Array of parsed sentences and actions
+ * Parse the structured summary from the prompt.
+ * Expects blocks like:
+ *   "sentence": "..."
+ *   "action": "..."
+ *   END_SENTENCE
+ * ending with END_SUMMARY
  */
 function parseStructuredScript(script) {
   if (!script || typeof script !== 'string') return [];
   let text = script.trim();
-  // Remove the END_SUMMARY marker and anything that follows
   const endIdx = text.indexOf('END_SUMMARY');
   if (endIdx !== -1) {
     text = text.substring(0, endIdx);
@@ -138,9 +147,7 @@ function parseStructuredScript(script) {
   const parts = text.split(/END_SENTENCE\s*/i).map((p) => p.trim()).filter(Boolean);
   const result = [];
   for (const part of parts) {
-    // Look for "sentence": "..."
     const sentenceMatch = part.match(/"sentence"\s*:\s*"([^"]*)"/i);
-    // action is optional
     const actionMatch = part.match(/"action"\s*:\s*"([^"]*)"/i);
     const sentence = sentenceMatch ? sentenceMatch[1] : null;
     const action = actionMatch ? actionMatch[1] : null;
@@ -148,7 +155,6 @@ function parseStructuredScript(script) {
       result.push({ sentence, action });
     }
   }
-  // Fallback: if nothing matched, just split on punctuation to avoid empty results
   if (result.length === 0) {
     const sentences = text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
     return sentences.map((s) => ({ sentence: s, action: null }));
@@ -157,38 +163,34 @@ function parseStructuredScript(script) {
 }
 
 /**
- * Uses the TTS API to generate an MP3 buffer for a sentence.
- * Update the payload if your TTS server expects different fields.
+ * Generate MP3 buffer via TTS API.
  */
 async function generateSpeech(text) {
-  // Example: Kokoro-style local API
   const speech = await ttsClient.audio.speech.create({
     model: config.ttsModel,
     voice: config.ttsVoice,
     input: text,
     speed: config.ttsSpeed,
-    // Some servers accept { response_format: 'mp3' } if needed
   });
   const audioBuffer = Buffer.from(await speech.arrayBuffer());
   return audioBuffer;
 }
 
-/** POST /summaries */
+/** POST /summaries
+ * Body: { text?: string, url?: string }
+ */
 app.post('/summaries', async (req, res) => {
   try {
-    // Allow callers to provide either a raw text string or a URL to scrape.
     const { text, url } = req.body;
-    // Validate that at least one of text or url is provided
+
     if ((!text || typeof text !== 'string' || !text.trim()) &&
         (!url || typeof url !== 'string' || !url.trim())) {
       return res.status(400).json({ error: 'Missing or empty `text` or `url` field.' });
     }
 
-    // Determine the content to summarise. Default to `text` if provided.
+    // Acquire input content (prefer text; else scrape url)
     let inputContent = text;
-
-    // If a URL is provided, fetch the page and extract human-readable content
-    if (url && typeof url === 'string' && url.trim()) {
+    if (!inputContent && url) {
       try {
         const response = await fetch(url);
         if (!response.ok) {
@@ -197,14 +199,12 @@ app.post('/summaries', async (req, res) => {
         const html = await response.text();
         const $ = cheerio.load(html);
 
-        // Extract candidate text content: headings, paragraphs, article content
-        const paragraphs = [];
+        const parts = [];
         $('main, article, section, h1, h2, h3, p, li').each((_, el) => {
           const txt = $(el).text().trim();
-          if (txt) paragraphs.push(txt);
+          if (txt) parts.push(txt);
         });
-        let extracted = paragraphs.join(' ');
-        // Fallback to the entire body text if no paragraphs were captured
+        let extracted = parts.join(' ');
         if (!extracted) {
           extracted = $('body').text().replace(/\s+/g, ' ').trim();
         }
@@ -215,42 +215,55 @@ app.post('/summaries', async (req, res) => {
       }
     }
 
-    // Summarise the extracted or provided text
+    // Summarise
     const summary = await generateSummary(inputContent);
     if (!summary) return res.status(502).json({ error: 'Failed to generate summary.' });
 
-    // Parse the structured script into sentence/action pairs
+    // Parse
     const parsed = parseStructuredScript(summary);
     if (parsed.length === 0) {
       return res.status(502).json({ error: 'Empty or invalid summary returned.' });
     }
-    // The first sentence acts as the title
+
     const title = parsed[0].sentence || 'Summary';
-    // Generate audio for each sentence and build the sections array
+
+    // TTS + Upload each sentence; store object key only
     const sections = [];
     for (const { sentence, action } of parsed) {
       const filename = `${uuidv4()}.mp3`;
       const filePath = path.join(__dirname, config.audioDir, filename);
+
+      // Generate speech
       const audioBuffer = await generateSpeech(sentence);
 
-      // Upload to Backblaze B2
-      await b2S3.send(new PutObjectCommand({
-        Bucket: config.bucket,          // <<< fixed to use config
-        Key: filename,
-        Body: audioBuffer,
-        ContentType: 'audio/mpeg',
-      }));
+      // Optional: keep a local copy (handy for debugging)
+      try { fs.writeFileSync(filePath, audioBuffer); } catch {}
 
-      const publicUrl = b2PublicUrl(filename);
-      // Include the action if provided
-      const section = { text: sentence, audio: publicUrl };
+      // Upload to B2
+      try {
+        await b2S3.send(new PutObjectCommand({
+          Bucket: config.bucket,
+          Key: filename,
+          Body: audioBuffer,
+          ContentType: 'audio/mpeg',
+        }));
+      } catch (e) {
+        console.error('B2 PutObject failed:', {
+          code: e?.Code || e?.name,
+          http: e?.$metadata?.httpStatusCode,
+          reqId: e?.$metadata?.requestId,
+          msg: e?.message,
+        });
+        throw e;
+      }
+
+      // Store only key; presign on GET
+      const section = { text: sentence, key: filename };
       if (action) section.action = action;
       sections.push(section);
     }
 
-    // Persist
     const story = await Story.create({ title, sections });
-
     return res.status(201).json(story);
   } catch (err) {
     console.error('POST /summaries error:', err);
@@ -258,15 +271,25 @@ app.post('/summaries', async (req, res) => {
   }
 });
 
-/** GET /summaries -> return the whole DB shuffled */
+/** GET /summaries -> return the whole DB shuffled, with presigned URLs */
 app.get('/summaries', async (_req, res) => {
   try {
-    // Fetch everything
     const docs = await Story.find({}).lean();
 
-    // Shuffle in memory
-    const shuffled = shuffle(docs);
+    const withUrls = await Promise.all(
+      docs.map(async (story) => {
+        const sections = await Promise.all(
+          (story.sections || []).map(async (s) => {
+            // If new docs have 'key', presign; else if legacy has 'audio', pass through
+            const audio = s.key ? await presignAudio(s.key, 3600) : s.audio;
+            return { ...s, audio };
+          })
+        );
+        return { ...story, sections };
+      })
+    );
 
+    const shuffled = shuffle(withUrls);
     return res.json(shuffled);
   } catch (err) {
     console.error('GET /summaries error:', err);

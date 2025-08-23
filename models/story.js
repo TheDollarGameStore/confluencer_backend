@@ -1,24 +1,25 @@
 const mongoose = require('mongoose');
 
-// Define a sub-schema for each section of the story. Each section
-// contains the text to be read aloud, the corresponding audio file
-// path, and the animation action. The action field is optional
-// because some summaries may not specify one.
+// Each section stores the TTS text, the B2 object key (required),
+// and an optional action cue. 'audio' is kept optional for legacy docs.
 const SectionSchema = new mongoose.Schema(
   {
-    text: { type: String, required: true },
-    audio: { type: String, required: true },
+    text:   { type: String, required: true },
+    key:    { type: String, required: true },  // B2 object key (e.g., "uuid.mp3")
     action: { type: String, default: null },
+
+    // Legacy: older docs may have persisted a public URL.
+    // Kept optional; your GET route now presigns from 'key'.
+    audio:  { type: String, required: false },
   },
   { _id: false }
 );
 
-// Define the main Story schema. A story has a title and an ordered
-// list of sections. Timestamps are enabled so we can track when
-// stories are created and updated.
+// Story with a title and ordered list of sections.
+// Timestamps so you can sort by createdAt/updatedAt if needed.
 const StorySchema = new mongoose.Schema(
   {
-    title: { type: String, required: true },
+    title:    { type: String, required: true },
     sections: { type: [SectionSchema], default: [] },
   },
   { timestamps: true }
