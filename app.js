@@ -179,11 +179,16 @@ app.post('/summaries', async (req, res) => {
   }
 });
 
-/** GET /summaries -> up to 10 random stories (shuffled) */
+/** GET /summaries -> return the whole DB shuffled */
 app.get('/summaries', async (_req, res) => {
   try {
-    const docs = await Story.aggregate([{ $sample: { size: 10 } }]);
-    return res.json(shuffle(docs));
+    // Fetch everything
+    const docs = await Story.find({}).lean();
+
+    // Shuffle in memory
+    const shuffled = shuffle(docs);
+
+    return res.json(shuffled);
   } catch (err) {
     console.error('GET /summaries error:', err);
     return res.status(500).json({ error: 'Internal server error.' });
