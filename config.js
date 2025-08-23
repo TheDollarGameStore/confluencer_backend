@@ -41,6 +41,8 @@ module.exports = {
     The first sentence you write is the title and it needs to be clickbait and catchy. It should also be short.
     Do not use new lines. Just continual sentences.
     Insert some jabs at typical corporate culture and red tape where appropriate.
+
+    I'll provide you with text from a scraped website. Ignore irrelevant stuff like buttons etc. Summarize the important information only.
     
     The script should be structured as follows:
     
@@ -64,9 +66,9 @@ module.exports = {
     surprised
     excited
     angry
-    explaining 1
-    explaining 2
-    explaining 3
+    explaining1
+    explaining2
+    explaining3
     `,
 
   // Default model used for chat completions. Update this to a model your
@@ -77,7 +79,7 @@ module.exports = {
   // available voices: alloy, echo, fable, onyx, nova, shimmer, etc. The
   // model tts-1-hd produces higher fidelity audio at the cost of tokens.
   ttsModel: process.env.TTS_MODEL || 'kokoro',
-  ttsVoice: process.env.TTS_VOICE || 'bm_daniel',
+  ttsVoice: process.env.TTS_VOICE || 'am_santa',
   ttsSpeed: parseFloat(process.env.TTS_SPEED) || 1.0,
 
   // The directory where generated audio files will be saved. This should
