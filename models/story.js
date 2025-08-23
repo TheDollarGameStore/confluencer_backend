@@ -1,26 +1,26 @@
 const mongoose = require('mongoose');
 
-// Each section stores the TTS text, the B2 object key (required),
+// Each section stores the TTS text, the B2/Cloudinary key (required),
 // and an optional action cue. 'audio' is kept optional for legacy docs.
 const SectionSchema = new mongoose.Schema(
   {
     text:   { type: String, required: true },
-    key:    { type: String, required: true },  // B2 object key (e.g., "uuid.mp3")
+    key:    { type: String, required: true },  // public mp3 URL or object key
     action: { type: String, default: null },
 
     // Legacy: older docs may have persisted a public URL.
-    // Kept optional; your GET route now presigns from 'key'.
     audio:  { type: String, required: false },
   },
   { _id: false }
 );
 
 // Story with a title and ordered list of sections.
-// Timestamps so you can sort by createdAt/updatedAt if needed.
+// Add sourceUrl to remember the input page used to generate this story.
 const StorySchema = new mongoose.Schema(
   {
-    title:    { type: String, required: true },
-    sections: { type: [SectionSchema], default: [] },
+    title:     { type: String, required: true },
+    sections:  { type: [SectionSchema], default: [] },
+    sourceUrl: { type: String, default: null },   // <-- NEW
   },
   { timestamps: true }
 );

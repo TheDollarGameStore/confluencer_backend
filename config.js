@@ -1,38 +1,21 @@
 // Configuration file for the summary TTS app.
-//
-// This module centralises all configurable values such as OpenAI API keys,
-// the summarisation prompt and MongoDB connection details. When deploying
-// or running the service locally, you can either set the corresponding
-// environment variables or edit the values below directly. It is
-// recommended to use environment variables for sensitive credentials.
+// Switched from MEGA to Cloudinary for hosting mp3s.
 
 require('dotenv').config();
 
 module.exports = {
-  // MongoDB connection string. Use a MongoDB Atlas URI with a user and
-  // password that has permission to insert and query documents. Example:
-  // mongodb+srv://username:password@cluster.mongodb.net/database?retryWrites=true&w=majority
-  mongoUri: process.env.MONGO_URI || '',
+  // ---- Mongo ----
+  mongoUri:
+    process.env.MONGO_URI ||
+    '',
 
-  // Configuration for the OpenAI client used for chat completions. This key
-  // should have access to the models you intend to use for summarisation
-  // (e.g. gpt-4o or gpt-3.5-turbo). See the OpenAI documentation for the
-  // available models. You can also set the model below in code.
+  // ---- OpenAI (chat + TTS proxy) ----
   openAiChatApiKey: process.env.OPENAI_CHAT_API_KEY || '',
   openAiChatApiUrl: process.env.OPENAI_CHAT_URL || 'https://api.openai.com/v1',
 
-  // Configuration for the OpenAI TTS endpoint. In many cases the same API
-  // key can be used for both chat and audio endpoints; however, OpenAI
-  // recommends using separate keys for better isolation and quota control.
   openAiTtsApiKey: process.env.OPENAI_TTS_API_KEY || 'NOT_REQUIRED',
   openAiTtsApiUrl: process.env.OPENAI_TTS_API_URL || 'http://localhost:8880/v1',
 
-  // The prompt that instructs the chat model how to perform summarisation.
-  // You can override this with an environment variable called
-  // SUMMARISATION_PROMPT. A good starting point is:
-  // "You are a helpful assistant that generates a concise summary and title
-  //  for the provided text. Your response should be plain text without
-  //  markdown."
   summarisationPrompt:
     process.env.SUMMARISATION_PROMPT ||
     `You are a confluencer. An influencer who makes short form content to explain documentation on Confluence.
@@ -71,30 +54,24 @@ module.exports = {
     explaining3
     `,
 
-  // Default model used for chat completions. Update this to a model your
-  // account has access to (e.g. "gpt-4o", "gpt-3.5-turbo").
   chatModel: process.env.CHAT_MODEL || 'gpt-5-mini',
 
-  // Voice and model for the TTS endpoint. See the OpenAI docs for
-  // available voices: alloy, echo, fable, onyx, nova, shimmer, etc. The
-  // model tts-1-hd produces higher fidelity audio at the cost of tokens.
+  // ---- TTS model settings (your FastAPI or OpenAI passthrough) ----
   ttsModel: process.env.TTS_MODEL || 'kokoro',
   ttsVoice: process.env.TTS_VOICE || 'am_santa',
   ttsSpeed: parseFloat(process.env.TTS_SPEED) || 1.0,
 
-  // The directory where generated audio files will be saved. This should
-  // exist relative to the project root. The server exposes it as a
-  // static path under /audio so clients can fetch mp3 files directly.
+  // Local scratch dir where we briefly write mp3s before uploading.
   audioDir: process.env.AUDIO_DIR || 'audio',
 
-  bucket: process.env.B2_BUCKET || "confluenceraudio",
-  key: process.env.B2_KEY || "",
-  secret: process.env.B2_SECRET || "",
-  region: process.env.B2_REGION || "us-east-005",
-  endpoint: process.env.B2_ENDPOINT || "https://s3.us-east-005.backblazeb2.com",
-  publicUrlBase: process.env.B2_PUBLIC_URL_BASE || `https://f005.backblazeb2.com/file/confluenceraudio`,
+  // ---- Cloudinary ----
+  // Folder to keep your uploads organized
+  cloudinaryFolder: process.env.CLOUDINARY_FOLDER || 'confluencer-audio',
+  cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+  cloudApiKey: process.env.CLOUDINARY_API_KEY || '',
+  cloudApiSecret: process.env.CLOUDINARY_API_SECRET || '',
 
-  // CORS: comma-separated list of allowed origins for GET (e.g., "https://confluencerclient.vercel.app")
+  // ---- CORS (GET-only) ----
   corsAllowedOrigins:
     process.env.CORS_ALLOWED_ORIGINS || 'https://confluencerclient.vercel.app',
 };
