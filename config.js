@@ -85,5 +85,12 @@ module.exports = {
   // The directory where generated audio files will be saved. This should
   // exist relative to the project root. The server exposes it as a
   // static path under /audio so clients can fetch mp3 files directly.
-  audioDir: process.env.AUDIO_DIR || 'audio'
+  audioDir: process.env.AUDIO_DIR || 'audio',
+
+  bucket: process.env.B2_BUCKET || "confluenceraudio",
+  key: process.env.B2_KEY || "",
+  secret: process.env.B2_SECRET || "",
+  region: process.env.B2_REGION || "us-east-005",
+  endpoint: process.env.B2_ENDPOINT || "https://s3.us-east-005.backblazeb2.com",
+  publicUrlBase: process.env.B2_PUBLIC_URL_BASE || `https://f005.backblazeb2.com/file/confluenceraudio`
 };

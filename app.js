@@ -14,6 +14,7 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 // Cheerio is used to scrape text from HTML pages when a URL is provided
 // instead of raw text. Ensure cheerio is installed in your project.
 const cheerio = require('cheerio');
@@ -21,7 +22,29 @@ const cheerio = require('cheerio');
 const config = require('./config');
 const Story = require('./models/story');
 
-// Ensure audio output directory exists
+/* ----------------------- B2 (S3-compatible) setup ----------------------- */
+const b2S3 = new S3Client({
+  region: config.region,                 // e.g. "us-west-002"
+  endpoint: config.endpoint,             // e.g. "https://s3.us-west-002.backblazeb2.com"
+  forcePathStyle: false,                 // B2 supports virtual-hosted style; set true if your setup needs it
+  credentials: {
+    accessKeyId: config.key || '',
+    secretAccessKey: config.secret || '',
+  },
+});
+
+function b2PublicUrl(key) {
+  // Prefer explicit public base from config, else fall back to default pattern
+  const base =
+    (config.publicUrlBase && config.publicUrlBase.trim()) ||
+    `https://f002.backblazeb2.com/file/${config.bucket}`;
+  // ensure no trailing slash
+  const cleanBase = base.replace(/\/+$/, '');
+  return `${cleanBase}/${key}`;
+}
+/* ----------------------------------------------------------------------- */
+
+// Ensure audio output directory exists (harmless even if unused)
 fs.mkdirSync(path.join(__dirname, config.audioDir), { recursive: true });
 
 // --- OpenAI clients ---
@@ -33,25 +56,59 @@ const chatClient = new OpenAI({
 
 // TTS client (can point to a DIFFERENT baseURL/API key than chat)
 const ttsClient = new OpenAI({
-  apiKey:
-    config.openAiTtsApiKey,
-    baseURL: config.openAiTtsApiUrl,
+  apiKey: config.openAiTtsApiKey,
+  baseURL: config.openAiTtsApiUrl,
 });
 
 // Express
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use('/audio', express.static(path.join(__dirname, config.audioDir)));
+app.use('/audio', express.static(path.join(__dirname, config.audioDir))); // kept for backward compat
 
 // Mongo
 mongoose
   .connect(config.mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+  .then(() => console.log('MongoDB connected'))
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
+
+/** Simple Fisher–Yates shuffle */
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/**
+ * Generate a summary script using the chat model.
+ * The prompt is loaded from config.summarisatonPrompt.
+ */
+async function generateSummary(inputText) {
+  try {
+    const resp = await chatClient.chat.completions.create({
+      model: config.chatModel,
+      messages: [
+        { role: 'system', content: config.summarisationPrompt },
+        { role: 'user', content: inputText }
+      ],
+      // omit temperature entirely for max compatibility
+    });
+    const text = resp?.choices?.[0]?.message?.content?.trim();
+    return text || '';
+  } catch (err) {
+    console.error('generateSummary error:', err);
+    return '';
+  }
+}
 
 
 /**
- * Parse the structured script returned from the summarisation prompt.
+ * Parse the structured summary format defined in the prompt.
  *
  * The summarisation prompt instructs the model to output a series of
  * blocks formatted like:
@@ -83,56 +140,32 @@ function parseStructuredScript(script) {
   for (const part of parts) {
     // Look for "sentence": "..."
     const sentenceMatch = part.match(/"sentence"\s*:\s*"([^"]*)"/i);
+    // action is optional
     const actionMatch = part.match(/"action"\s*:\s*"([^"]*)"/i);
-    if (sentenceMatch) {
-      const sentence = sentenceMatch[1].trim();
-      const action = actionMatch ? actionMatch[1].trim() : null;
-      // Ignore empty sentences
-      if (sentence) {
-        result.push({ sentence, action });
-      }
+    const sentence = sentenceMatch ? sentenceMatch[1] : null;
+    const action = actionMatch ? actionMatch[1] : null;
+    if (sentence && sentence.length > 0) {
+      result.push({ sentence, action });
     }
   }
-  // If nothing matched the structured format, fall back to old sentence splitting
+  // Fallback: if nothing matched, just split on punctuation to avoid empty results
   if (result.length === 0) {
-    const fallback = script
-      .replace(/\r\n/g, ' ')
-      .split(/(?<=[.!?])\s+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return fallback.map((s) => ({ sentence: s, action: null }));
+    const sentences = text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+    return sentences.map((s) => ({ sentence: s, action: null }));
   }
   return result;
 }
 
-/** Fisher-Yates shuffle */
-function shuffle(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-/** Call OpenAI Chat to generate a summary (title as first sentence) */
-async function generateSummary(text) {
-  const resp = await chatClient.chat.completions.create({
-    model: config.chatModel,
-    messages: [
-      { role: 'system', content: config.summarisationPrompt },
-      { role: 'user', content: text },
-    ],
-  });
-  const out = resp.choices?.[0]?.message?.content || '';
-  return out.trim();
-}
-
-/** Call OpenAI TTS to generate MP3 for a sentence */
-async function generateSpeech(sentence) {
+/**
+ * Uses the TTS API to generate an MP3 buffer for a sentence.
+ * Update the payload if your TTS server expects different fields.
+ */
+async function generateSpeech(text) {
+  // Example: Kokoro-style local API
   const speech = await ttsClient.audio.speech.create({
-    model: config.ttsModel, // e.g. 'tts-1' (or your compatible server model)
-    voice: config.ttsVoice, // e.g. 'alloy' / 'bm_daniel'
-    input: sentence,
+    model: config.ttsModel,
+    voice: config.ttsVoice,
+    input: text,
     speed: config.ttsSpeed,
     // Some servers accept { response_format: 'mp3' } if needed
   });
@@ -154,7 +187,7 @@ app.post('/summaries', async (req, res) => {
     // Determine the content to summarise. Default to `text` if provided.
     let inputContent = text;
 
-    // If a URL is provided, fetch the page and extract human‑readable content
+    // If a URL is provided, fetch the page and extract human-readable content
     if (url && typeof url === 'string' && url.trim()) {
       try {
         const response = await fetch(url);
@@ -163,9 +196,10 @@ app.post('/summaries', async (req, res) => {
         }
         const html = await response.text();
         const $ = cheerio.load(html);
-        // Collect paragraph and heading text into an array
+
+        // Extract candidate text content: headings, paragraphs, article content
         const paragraphs = [];
-        $('h1, h2, h3, h4, h5, h6, p').each((_i, el) => {
+        $('main, article, section, h1, h2, h3, p, li').each((_, el) => {
           const txt = $(el).text().trim();
           if (txt) paragraphs.push(txt);
         });
@@ -198,9 +232,18 @@ app.post('/summaries', async (req, res) => {
       const filename = `${uuidv4()}.mp3`;
       const filePath = path.join(__dirname, config.audioDir, filename);
       const audioBuffer = await generateSpeech(sentence);
-      await fs.promises.writeFile(filePath, audioBuffer);
+
+      // Upload to Backblaze B2
+      await b2S3.send(new PutObjectCommand({
+        Bucket: config.bucket,          // <<< fixed to use config
+        Key: filename,
+        Body: audioBuffer,
+        ContentType: 'audio/mpeg',
+      }));
+
+      const publicUrl = b2PublicUrl(filename);
       // Include the action if provided
-      const section = { text: sentence, audio: `/audio/${filename}` };
+      const section = { text: sentence, audio: publicUrl };
       if (action) section.action = action;
       sections.push(section);
     }
