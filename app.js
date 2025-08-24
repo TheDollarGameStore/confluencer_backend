@@ -1,10 +1,9 @@
 /*
- * Main application file for the summary-to-speech service.
- * Now uses Cloudinary for mp3 hosting (public, direct .mp3 URLs).
+ * Summary-to-speech service (multi-confluencer).
+ * - POST /summaries   -> generate BOTH Brain and Girl sections (with persona voices)
+ * - GET  /summaries?confluencer=Brain|Girl -> return stories with ONLY that persona’s sections
  *
- * Endpoints:
- *   POST /summaries  -> Summarise input text or URL, TTS each sentence, upload to Cloudinary, store Cloudinary URL in Mongo
- *   GET  /summaries  -> Return all stories (shuffled), each section includes a Cloudinary .mp3 link in `audio`
+ * Cloudinary for hosting .mp3 (direct URLs).
  */
 
 const express = require('express');
@@ -45,17 +44,15 @@ cloudinary.config({
   secure: true,
 });
 
-// Upload a local mp3 file to Cloudinary and return the secure mp3 URL
 async function uploadToCloudinary(localFilePath, filenameNoExt) {
-  // Use resource_type "video" for audio (Cloudinary convention) so we get a .mp3 URL
   const res = await cloudinary.uploader.upload(localFilePath, {
     resource_type: 'video',
     folder: config.cloudinaryFolder,
-    public_id: filenameNoExt, // do not include extension
+    public_id: filenameNoExt,
     overwrite: true,
-    format: 'mp3', // ensure URL ends in .mp3
+    format: 'mp3',
   });
-  return res.secure_url; // typically .../video/upload/.../<public_id>.mp3
+  return res.secure_url;
 }
 
 /* ------------------------------ OpenAI clients ----------------------------- */
@@ -71,7 +68,8 @@ const ttsClient = new OpenAI({
 /* --------------------------------- Express -------------------------------- */
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use('/audio', express.static(path.join(__dirname, config.audioDir))); // legacy local serving (optional)
+fs.mkdirSync(path.join(__dirname, config.audioDir), { recursive: true });
+app.use('/audio', express.static(path.join(__dirname, config.audioDir))); // optional legacy local serving
 
 /* --------------------------------- Mongo ---------------------------------- */
 mongoose
@@ -90,23 +88,6 @@ function shuffle(arr) {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
-}
-
-async function generateSummary(inputText) {
-  try {
-    const resp = await chatClient.chat.completions.create({
-      model: config.chatModel,
-      messages: [
-        { role: 'system', content: config.summarisationPrompt },
-        { role: 'user', content: inputText },
-      ],
-    });
-    const text = resp?.choices?.[0]?.message?.content?.trim();
-    return text || '';
-  } catch (err) {
-    console.error('generateSummary error:', err);
-    return '';
-  }
 }
 
 function parseStructuredScript(script) {
@@ -135,23 +116,73 @@ function parseStructuredScript(script) {
   return result;
 }
 
-async function generateSpeech(text) {
+async function generateSpeech(text, voice) {
   const speech = await ttsClient.audio.speech.create({
     model: config.ttsModel,
-    voice: config.ttsVoice,
+    voice,
     input: text,
     speed: config.ttsSpeed,
   });
   return Buffer.from(await speech.arrayBuffer());
 }
 
-// Ensure local audio scratch dir exists
-fs.mkdirSync(path.join(__dirname, config.audioDir), { recursive: true });
+async function fetchAndExtract(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+  const html = await response.text();
+  const $ = cheerio.load(html);
+
+  const parts = [];
+  $('main, article, section, h1, h2, h3, p, li').each((_, el) => {
+    const txt = $(el).text().trim();
+    if (txt) parts.push(txt);
+  });
+  let extracted = parts.join(' ');
+  if (!extracted) extracted = $('body').text().replace(/\s+/g, ' ').trim();
+  return extracted;
+}
+
+// System messages per persona combine structurePrompt + that persona’s voice prompt.
+function buildSystemPrompt(persona) {
+  const p = config.confluencerPrompts?.[persona] || '';
+  return `${config.structurePrompt}\n\n${p}`.trim();
+}
+
+async function generatePersonaScript(inputText, persona) {
+  const resp = await chatClient.chat.completions.create({
+    model: config.chatModel,
+    messages: [
+      { role: 'system', content: buildSystemPrompt(persona) },
+      { role: 'user', content: inputText },
+    ],
+  });
+  return resp?.choices?.[0]?.message?.content?.trim() || '';
+}
+
+async function ttsAndUploadSections(parsed, voice) {
+  const out = [];
+  for (const { sentence, action } of parsed) {
+    const id = uuidv4();
+    const filename = `${id}.mp3`;
+    const filePath = path.join(__dirname, config.audioDir, filename);
+
+    const audioBuffer = await generateSpeech(sentence, voice);
+    fs.writeFileSync(filePath, audioBuffer);
+
+    const secureUrl = await uploadToCloudinary(filePath, id);
+    try { fs.unlinkSync(filePath); } catch {}
+
+    const section = { text: sentence, key: secureUrl };
+    if (action) section.action = action;
+    out.push(section);
+  }
+  return out;
+}
 
 /* -------------------------------- Endpoints -------------------------------- */
 /** POST /summaries
  * Body: { text?: string, url?: string }
- * NOTE: No CORS on POST (frontend shouldn’t call it).
+ * Generates BOTH personas and stores them separately.
  */
 app.post('/summaries', async (req, res) => {
   try {
@@ -163,67 +194,46 @@ app.post('/summaries', async (req, res) => {
       return res.status(400).json({ error: 'Missing or empty `text` or `url` field.' });
     }
 
-    // Acquire input content (prefer text; else scrape url)
     let inputContent = text;
     if (!inputContent && url) {
       try {
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
-        const html = await response.text();
-        const $ = cheerio.load(html);
-
-        const parts = [];
-        $('main, article, section, h1, h2, h3, p, li').each((_, el) => {
-          const txt = $(el).text().trim();
-          if (txt) parts.push(txt);
-        });
-        let extracted = parts.join(' ');
-        if (!extracted) extracted = $('body').text().replace(/\s+/g, ' ').trim();
-        inputContent = extracted;
+        inputContent = await fetchAndExtract(url);
       } catch (err) {
         console.error('Error fetching or parsing URL:', err);
         return res.status(400).json({ error: 'Unable to fetch or parse the provided URL.' });
       }
     }
 
-    // Summarise
-    const summary = await generateSummary(inputContent);
-    if (!summary) return res.status(502).json({ error: 'Failed to generate summary.' });
+    // Generate per-persona scripts (using shared structure + persona tone)
+    const [brainScript, girlScript] = await Promise.all([
+      generatePersonaScript(inputContent, 'Brain'),
+      generatePersonaScript(inputContent, 'Girl'),
+    ]);
 
-    // Parse
-    const parsed = parseStructuredScript(summary);
-    if (parsed.length === 0) return res.status(502).json({ error: 'Empty or invalid summary returned.' });
+    const brainParsed = parseStructuredScript(brainScript);
+    const girlParsed = parseStructuredScript(girlScript);
 
-    const title = parsed[0].sentence || 'Summary';
-
-    // TTS + Upload each sentence to Cloudinary; store public URL in "key"
-    const sections = [];
-    for (const { sentence, action } of parsed) {
-      const id = uuidv4();
-      const filename = `${id}.mp3`;
-      const filePath = path.join(__dirname, config.audioDir, filename);
-
-      // Generate mp3
-      const audioBuffer = await generateSpeech(sentence);
-      fs.writeFileSync(filePath, audioBuffer);
-
-      // Upload to Cloudinary
-      const secureUrl = await uploadToCloudinary(filePath, id);
-
-      // Optional: clean up local file (comment out if you want to keep a cache)
-      try {
-        fs.unlinkSync(filePath);
-      } catch {}
-
-      const section = { text: sentence, key: secureUrl };
-      if (action) section.action = action;
-      sections.push(section);
+    if (!brainParsed.length && !girlParsed.length) {
+      return res.status(502).json({ error: 'Failed to generate summaries.' });
     }
+
+    // Title: prefer first Brain sentence; otherwise Girl; otherwise fallback.
+    const title =
+      brainParsed[0]?.sentence ||
+      girlParsed[0]?.sentence ||
+      'Summary';
+
+    // TTS & upload for each persona with its own voice
+    const [sectionsBrain, sectionsGirl] = await Promise.all([
+      ttsAndUploadSections(brainParsed, config.ttsVoices.Brain),
+      ttsAndUploadSections(girlParsed,  config.ttsVoices.Girl),
+    ]);
 
     const story = await Story.create({
       title,
-      sections,
-      sourceUrl: url || null,   // <-- NEW: only set if client posted a url
+      sectionsBrain,
+      sectionsGirl,
+      sourceUrl: url || null,
     });
 
     return res.status(201).json(story);
@@ -233,27 +243,46 @@ app.post('/summaries', async (req, res) => {
   }
 });
 
-/** GET /summaries -> return the whole DB shuffled, with Cloudinary mp3 URLs
- * CORS is attached here so your Vercel app can call it.
+/** GET /summaries?confluencer=Brain|Girl
+ * Returns the DB (shuffled) but ONLY the requested persona’s sections mapped to `sections`.
+ * If no param or invalid value, defaults to Brain.
+ * Legacy docs without per-persona fields are mapped to both Brain/Girl as the same content.
  */
 app.options('/summaries', corsGetOnly);
-app.get('/summaries', corsGetOnly, async (_req, res) => {
+app.get('/summaries', corsGetOnly, async (req, res) => {
   try {
+    const personaRaw = String(req.query.confluencer || 'Brain');
+    const persona = /girl/i.test(personaRaw) ? 'Girl' : 'Brain';
+
     const docs = await Story.find({}).lean();
 
-    // Map legacy docs (audio) and new docs (key -> Cloudinary URL) to a uniform `audio`
-    const withUrls = docs.map((story) => {
-      const sections = (story.sections || []).map((s) => {
+    const mapped = docs.map((story) => {
+      // Determine the right bucket for this persona; fall back to legacy sections if needed
+      const chosen =
+        persona === 'Girl'
+          ? (story.sectionsGirl?.length ? story.sectionsGirl : story.sections)
+          : (story.sectionsBrain?.length ? story.sectionsBrain : story.sections);
+
+      // Normalize to { text, action, audio } with mp3 URL in `audio`
+      const sections = (chosen || []).map((s) => {
         const audio =
           s.key && (s.key.includes('res.cloudinary.com') || s.key.endsWith('.mp3'))
             ? s.key
-            : s.audio; // new vs legacy
-        return { ...s, audio };
+            : s.audio;
+        return { text: s.text, action: s.action ?? null, audio };
       });
-      return { ...story, sections };
+
+      return {
+        _id: story._id,
+        title: story.title,
+        sections,
+        sourceUrl: story.sourceUrl || null,
+        createdAt: story.createdAt,
+        updatedAt: story.updatedAt,
+      };
     });
 
-    return res.json(shuffle(withUrls));
+    return res.json(shuffle(mapped));
   } catch (err) {
     console.error('GET /summaries error:', err);
     return res.status(500).json({ error: 'Internal server error.' });

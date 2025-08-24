@@ -1,13 +1,9 @@
-// Configuration file for the summary TTS app.
-// Switched from MEGA to Cloudinary for hosting mp3s.
-
+// Configuration for the summary TTS app with multi-confluencer support.
 require('dotenv').config();
 
 module.exports = {
   // ---- Mongo ----
-  mongoUri:
-    process.env.MONGO_URI ||
-    '',
+  mongoUri: process.env.MONGO_URI || '',
 
   // ---- OpenAI (chat + TTS proxy) ----
   openAiChatApiKey: process.env.OPENAI_CHAT_API_KEY || '',
@@ -16,30 +12,28 @@ module.exports = {
   openAiTtsApiKey: process.env.OPENAI_TTS_API_KEY || 'NOT_REQUIRED',
   openAiTtsApiUrl: process.env.OPENAI_TTS_API_URL || 'http://localhost:8880/v1',
 
-  summarisationPrompt:
-    process.env.SUMMARISATION_PROMPT ||
-    `You are a confluencer. An influencer who makes short form content to explain documentation on Confluence.
-    You speak with humour and clickbait. You provide a rundown of an entire page being fed to you within 60 seconds.
-    Provide me a script containing only the text that needs to be read out loud. No markdown, No parentheticals, stage directions, narrative asides, inline action cues or anything else.
-    The first sentence you write is the title and it needs to be clickbait and catchy. It should also be short.
-    Do not use new lines. Just continual sentences.
-    Insert some jabs at typical corporate culture and red tape where appropriate.
+  chatModel: process.env.CHAT_MODEL || 'gpt-5-mini',
 
-    I'll provide you with text from a scraped website. Ignore irrelevant stuff like buttons etc. Summarize the important information only.
-    
-    The script should be structured as follows:
-    
+  // ---- Prompts ----
+  // A single structure/format prompt that defines HOW to output (title first,
+  // "sentence"/"action" blocks, END_SENTENCE, END_SUMMARY, etc.).
+  structurePrompt:
+    process.env.STRUCTURE_PROMPT ||
+    `You are producing a short-form script from technical or documentation text.
+    Output ONLY the lines to be read aloud (no markdown, no stage directions, no asides).
+    The FIRST sentence is the title: short, punchy, and clickbaity.
+    No newlines; write as continuous sentences.
+    Ignore UI chrome (buttons/menus). Summarize only core content.
+
+    Structure EXACTLY like this for EACH sentence:
     "sentence": "sentence goes here"
     "action": "action name here"
     END_SENTENCE
-    
-    Repeat this for each sentence.
-    
-    At the end of all sentences, add the following:
+
+    At the very end, append:
     END_SUMMARY
 
-    You decide what animation action to use. The actions you have available to you are the following:
-
+    Valid actions:
     thinking
     shrug
     laugh
@@ -51,21 +45,35 @@ module.exports = {
     angry
     explaining1
     explaining2
-    explaining3
-    `,
+    explaining3`,
 
-  chatModel: process.env.CHAT_MODEL || 'gpt-5-mini',
+  // Persona prompts: WHAT to sound like (tone, attitude).
+  confluencerPrompts: {
+    Brain:
+      process.env.PROMPT_BRAIN ||
+      `Persona: Brain — a witty, slightly snarky "corporate-brain" mascot.
+       Tone: playful, clever, unapologetically nerdy. Toss in light jabs at red tape.
+       Keep sentences tight and energetic.`,
+    Girl:
+      process.env.PROMPT_GIRL ||
+      `Persona: Girl — upbeat anime-style explainer vibes.
+       Tone: friendly, excited, charmingly dramatic clickbait energy.
+       Sprinkle light humor and keep momentum high.`,
+  },
 
-  // ---- TTS model settings (your FastAPI or OpenAI passthrough) ----
+  // ---- TTS model settings ----
   ttsModel: process.env.TTS_MODEL || 'kokoro',
-  ttsVoice: process.env.TTS_VOICE || 'am_santa',
+  // Persona-specific voices
+  ttsVoices: {
+    Brain: process.env.TTS_VOICE_BRAIN || 'am_santa',
+    Girl: process.env.TTS_VOICE_GIRL || 'af_bella(1)+af_nicole(1)',
+  },
   ttsSpeed: parseFloat(process.env.TTS_SPEED) || 1.0,
 
   // Local scratch dir where we briefly write mp3s before uploading.
   audioDir: process.env.AUDIO_DIR || 'audio',
 
   // ---- Cloudinary ----
-  // Folder to keep your uploads organized
   cloudinaryFolder: process.env.CLOUDINARY_FOLDER || 'confluencer-audio',
   cloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
   cloudApiKey: process.env.CLOUDINARY_API_KEY || '',
