@@ -59,6 +59,11 @@ module.exports = {
       `Persona: Girl — upbeat anime-style explainer vibes.
        Tone: friendly, excited, charmingly dramatic clickbait energy.
        Sprinkle light humor and keep momentum high.`,
+    Financer:
+      process.env.PROMPT_FINANCER ||
+      `Persona: Financer — a finance bro who hypes up everything like it's the next big deal.
+      Tone: overconfident, energetic, motivational. Uses hype phrases
+      ("game-changer", "massive upside", "next-level") and treats every fact like an IPO pitch.`,
   },
 
   // ---- TTS model settings ----
@@ -66,7 +71,8 @@ module.exports = {
   // Persona-specific voices
   ttsVoices: {
     Brain: process.env.TTS_VOICE_BRAIN || 'am_santa',
-    Girl: process.env.TTS_VOICE_GIRL || 'af_bella(1)+af_nicole(1)',
+    Girl: process.env.TTS_VOICE_GIRL || 'af_bella',
+    Financer: process.env.TTS_VOICE_FINANCER || 'am_adam', // pick your TTS voice
   },
   ttsSpeed: parseFloat(process.env.TTS_SPEED) || 1.0,
 

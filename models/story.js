@@ -19,10 +19,12 @@ const StorySchema = new mongoose.Schema(
     title:           { type: String, required: true },
     sectionsBrain:   { type: [SectionSchema], default: [] },
     sectionsGirl:    { type: [SectionSchema], default: [] },
+    sectionsFinancer:{ type: [SectionSchema], default: [] }, // NEW
 
     sourceUrl:       { type: String, default: null },
   },
   { timestamps: true }
 );
+
 
 module.exports = mongoose.model('Story', StorySchema);

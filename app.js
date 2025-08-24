@@ -205,13 +205,15 @@ app.post('/summaries', async (req, res) => {
     }
 
     // Generate per-persona scripts (using shared structure + persona tone)
-    const [brainScript, girlScript] = await Promise.all([
+    const [brainScript, girlScript, financerScript] = await Promise.all([
       generatePersonaScript(inputContent, 'Brain'),
       generatePersonaScript(inputContent, 'Girl'),
+      generatePersonaScript(inputContent, 'Financer'),
     ]);
 
     const brainParsed = parseStructuredScript(brainScript);
     const girlParsed = parseStructuredScript(girlScript);
+    const financerParsed = parseStructuredScript(financerScript);
 
     if (!brainParsed.length && !girlParsed.length) {
       return res.status(502).json({ error: 'Failed to generate summaries.' });
@@ -221,18 +223,21 @@ app.post('/summaries', async (req, res) => {
     const title =
       brainParsed[0]?.sentence ||
       girlParsed[0]?.sentence ||
+      financerParsed[0]?.sentence ||
       'Summary';
 
     // TTS & upload for each persona with its own voice
-    const [sectionsBrain, sectionsGirl] = await Promise.all([
-      ttsAndUploadSections(brainParsed, config.ttsVoices.Brain),
-      ttsAndUploadSections(girlParsed,  config.ttsVoices.Girl),
+    const [sectionsBrain, sectionsGirl, sectionsFinancer] = await Promise.all([
+      ttsAndUploadSections(brainParsed,    config.ttsVoices.Brain),
+      ttsAndUploadSections(girlParsed,     config.ttsVoices.Girl),
+      ttsAndUploadSections(financerParsed, config.ttsVoices.Financer),
     ]);
 
     const story = await Story.create({
       title,
       sectionsBrain,
       sectionsGirl,
+      sectionsFinancer,
       sourceUrl: url || null,
     });
 
@@ -252,7 +257,9 @@ app.options('/summaries', corsGetOnly);
 app.get('/summaries', corsGetOnly, async (req, res) => {
   try {
     const personaRaw = String(req.query.confluencer || 'Brain');
-    const persona = /girl/i.test(personaRaw) ? 'Girl' : 'Brain';
+    let persona = 'Brain';
+    if (/girl/i.test(personaRaw)) persona = 'Girl';
+    else if (/financer/i.test(personaRaw)) persona = 'Financer';
 
     const docs = await Story.find({}).lean();
 
@@ -261,7 +268,9 @@ app.get('/summaries', corsGetOnly, async (req, res) => {
       const chosen =
         persona === 'Girl'
           ? (story.sectionsGirl?.length ? story.sectionsGirl : story.sections)
-          : (story.sectionsBrain?.length ? story.sectionsBrain : story.sections);
+        : persona === 'Financer'
+          ? (story.sectionsFinancer?.length ? story.sectionsFinancer : story.sections)
+        : (story.sectionsBrain?.length ? story.sectionsBrain : story.sections);
 
       // Normalize to { text, action, audio } with mp3 URL in `audio`
       const sections = (chosen || []).map((s) => {
